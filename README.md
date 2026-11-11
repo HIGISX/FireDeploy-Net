@@ -1,106 +1,158 @@
 # FireDeploy-Net
 
-Deep reinforcement learning for multi-period stationing and repositioning of mobile fire units.
+**Deep reinforcement learning for multi-period stationing and repositioning of mobile fire units.**
 
-This repository provides the model, training and deterministic inference code accompanying:
+Code accompanying the manuscript:
 
-**Augmenting Permanent Fire Station Networks through Multi-Period Stationing and Repositioning of Mobile Units: A Deep Reinforcement Learning Approach**
+> **Augmenting Permanent Fire Station Networks through Multi-Period Stationing and Repositioning of Mobile Units: A Deep Reinforcement Learning Approach**
 
-FireDeploy-Net supplements an existing permanent fire-station network. It selects mobile-unit locations for morning peak, midday off-peak and evening peak under a cumulative repositioning-distance budget. The policy combines a spatial attention encoder, dual-service gated fusion, a period–repositioning branch and a dynamic feasibility mask.
+## Overview
 
-## Scope
+FireDeploy-Net generates mobile fire-unit deployment plans that supplement an existing permanent fire-station network. It jointly considers morning peak, midday off-peak and evening peak, subject to the number of available units and a cumulative repositioning-distance budget.
 
-The release contains a portable, single-process implementation of the model and REINFORCE learning objective. The original parameter names are retained to support research checkpoints containing a `policy` state dictionary. CPU and single-GPU execution are supported; the environment performs FP64 service updates and exact directed matching on the CPU.
+The model integrates a spatial attention encoder, dual-service gated fusion, a period–repositioning branch and a dynamic feasibility mask. Training uses REINFORCE with a leave-one-out baseline; deterministic inference selects the highest-probability legal candidate at each step.
 
-The paper's training run also used distributed and GPU-environment optimizations. Those machine-specific execution components are not part of this release. This implementation is not expected to reproduce that run's exact stochastic trajectory or reported runtime. Compatibility of parameter names alone does not establish numerical parity of a complete Beijing rollout.
+The baseline objective combines normalized continuous service-utility improvement and squared-overtime reduction:
 
-This is a **code-only release**. Beijing input arrays, pretrained and fine-tuned weights, experiment logs, comparison algorithms and plotting scripts are not included. The synthetic example below tests the software and does not reproduce paper results. Complete Beijing reproduction requires the processed instance and the single-period pretrained policy; U9050 inference requires the selected fine-tuned checkpoint.
+$$
+F = \frac{1}{2}\frac{U-U_0}{\Delta U}
+  + \frac{1}{2}\frac{Q_0-Q}{\Delta Q}.
+$$
+
+Here, $U$ is the three-period mean demand-weighted continuous service utility, and $Q$ is the three-period mean area-weighted squared response overtime above 5 minutes. Normalization uses the permanent-station baseline and an all-candidate service reference. Repositioning distances are evaluated through exact one-to-one minimum-cost matching on a directed distance matrix.
+
+## Repository structure
+
+```text
+FireDeploy-Net/
+├── firedeploy/              Model, environment, training and inference
+├── configs/
+│   ├── beijing.json         Beijing training configuration
+│   └── smoke.json           Synthetic example configuration
+├── examples/               Synthetic instance generator
+├── tests/                  Automated correctness checks
+├── docs/data_format.md     Input and checkpoint specifications
+├── licenses/               Third-party license notices
+├── requirements.txt
+├── pyproject.toml
+└── LICENSE
+```
 
 ## Installation
 
-Python 3.10 or later is required. The research environment used Python 3.10.20 and PyTorch 2.6.0. Install an appropriate PyTorch 2.6.0 build for your CUDA driver or CPU first, then install this package:
+**Requirements:** Python 3.10–3.13 and PyTorch 2.6 or later within the 2.x series. CPU and single-GPU execution are supported.
 
 ```bash
 git clone https://github.com/HIGISX/FireDeploy-Net.git
 cd FireDeploy-Net
 python -m venv .venv
-# Linux / macOS:
-source .venv/bin/activate
-# Windows PowerShell instead: .venv\Scripts\Activate.ps1
+```
+
+Activate the environment using `source .venv/bin/activate` on Linux/macOS or `.venv\Scripts\Activate.ps1` in Windows PowerShell. For GPU execution, first install a suitable PyTorch build following the [official installation instructions](https://pytorch.org/get-started/previous-versions/).
+
+```bash
 python -m pip install -r requirements.txt
 python -m pip install -e .
 ```
 
-For a CUDA-specific wheel, use the installation command supplied by [PyTorch](https://pytorch.org/get-started/previous-versions/). PyTorch 1.13 is not supported by this implementation because the model uses scaled dot-product attention and non-reentrant activation checkpointing.
+## Quick start
 
-The dependency ranges allow PyTorch 2.6–2.x. Release checks were run on CPU with Python 3.13.13 and PyTorch 2.9.1; this is separate from the paper's training environment. The checks cover synthetic training/inference, feasibility, checkpoint loading, and agreement of encoder outputs and action scores with the archived model on small inputs. A complete Beijing run was not repeated for this release.
-
-## Quick check on synthetic data
+This example runs without the Beijing dataset or pretrained weights. It creates an artificial instance with 12 candidates, 20 demand grids and two units per period, then performs two training updates and deterministic inference.
 
 ```bash
 python examples/make_synthetic.py --output data/synthetic
 python -m firedeploy.train --data data/synthetic/instance.json --config configs/smoke.json --output runs/smoke --from-scratch --device cpu --microbatch 2 --threads 1
 python -m firedeploy.infer --data data/synthetic/instance.json --checkpoint runs/smoke/best.pt --output runs/smoke/deployment.json --device cpu --threads 1
-python -m unittest discover -s tests -v
 ```
 
-The example creates 12 artificial candidates and 20 demand grids, with two units in each of three periods. Only two tiny policy updates are performed. Use a new output directory when repeating a check.
+Use a new output directory when repeating the example. Synthetic outputs verify software functionality and do not reproduce the study results.
+
+## Data and checkpoints
+
+This is a **code-only release**: processed Beijing data and model weights are not included.
+
+For the Beijing case, prepare an `instance.json` manifest and its referenced arrays according to [docs/data_format.md](docs/data_format.md). Fine-tuning additionally requires a single-period pretrained policy; inference requires a full FireDeploy-Net checkpoint. All input paths are resolved relative to the manifest.
+
+The implementation assumes three periods and the equal-weight objective defined above. The study's baseline uses 100 mobile units per period and a cumulative repositioning budget of approximately 250.60 km. The full-precision budget and data definitions are provided in the input specification.
 
 ## Training
+
+Fine-tune from a single-period pretrained policy:
 
 ```bash
 python -m firedeploy.train --data data/beijing/instance.json --config configs/beijing.json --pretrained checkpoints/single_period.pt --output runs/beijing --device cuda --microbatch 8
 ```
 
-The baseline configuration specifies 200 epochs, 50 updates per epoch, an effective batch of 128 complete deployments, Adam with learning rate `1e-4`, gradient-norm clipping at 1 and deterministic evaluation every 50 updates. There is no entropy regularization. The leave-one-out baseline is computed across the full effective batch. Microbatching uses sampled-action replay to reduce memory use without changing the batch-level REINFORCE objective.
+The paths above assume that the required data and weights have been prepared locally. Use `--device cpu` for CPU execution.
 
-Training writes `latest.pt` (optimizer and RNG state), `best.pt` (highest evaluated deterministic objective), `final.pt`, `history.json` and `summary.json`. Existing output directories are protected from accidental replacement. Resume using the same input, configuration, visible device setup and execution options:
+The baseline training settings are:
+
+| Setting | Value |
+|---|---:|
+| Epochs | 200 |
+| Updates per epoch | 50 |
+| Effective batch size | 128 complete deployments |
+| Optimizer | Adam |
+| Learning rate | $10^{-4}$ |
+| Gradient-norm clipping | 1 |
+| Deterministic evaluation interval | 50 updates |
+| Entropy regularization | None |
+
+Configurable settings are defined in [configs/beijing.json](configs/beijing.json). The `--microbatch` option controls memory use through sampled-action replay; the leave-one-out baseline is computed over the complete effective batch.
+
+Training outputs include:
+
+| File | Description |
+|---|---|
+| `latest.pt` | Model, optimizer, random-number states and progress for resuming |
+| `best.pt` | Checkpoint with the highest evaluated deterministic objective |
+| `final.pt` | Model at the end of training |
+| `history.json` | Training records and periodic evaluations |
+| `summary.json` | Final and best results, update count and elapsed time |
+
+Resume with the same data, configuration and execution settings:
 
 ```bash
 python -m firedeploy.train --data data/beijing/instance.json --config configs/beijing.json --resume runs/beijing/latest.pt --output runs/beijing --device cuda --microbatch 8
 ```
 
-`--resume` accepts checkpoints produced by this release. Historical distributed checkpoints have a different optimizer/RNG layout; their policy weights can be used for inference, but they are not supported as exact continuation checkpoints here. Load only trusted checkpoint files.
+The resume entry point accepts checkpoints generated by this implementation. Original distributed-training checkpoints use a different optimizer and random-state format and are not supported for exact continuation.
 
-## Deterministic inference
+## Inference
+
+Generate and evaluate a deterministic deployment:
 
 ```bash
-python -m firedeploy.infer --data data/beijing/instance.json --checkpoint checkpoints/U9050.pt --output runs/U9050.json --device cuda
+python -m firedeploy.infer --data data/beijing/instance.json --checkpoint checkpoints/best.pt --output runs/deployment.json --device cuda
 ```
 
-Decoding selects the highest-probability legal candidate at every step. Output includes candidate indices and IDs, per-period service metrics, matched transitions, total distance and feasibility. Initialization, warm-up, decoding and independent verification times are reported separately. The default single warm-up is excluded from `decode_seconds` but included in `total_seconds`.
+The output JSON reports selected candidate IDs, per-period service metrics, matched repositioning pairs, cumulative distance and feasibility. Service metrics and matching costs are independently recomputed after decoding.
 
-## Objective and constraints
+Initialization, warm-up, decoding and verification times are reported separately. By default, one warm-up deployment is excluded from `decode_seconds` and included in `total_seconds`. Existing output files are not overwritten.
 
-Let `U` be the equal-period mean demand-weighted continuous service utility, and `Q` the equal-period mean area-weighted squared excess response time above 5 minutes. The baseline objective is
+## Validation and reproducibility
 
-```text
-F = 0.5 * (U - U0) / delta_U + 0.5 * (Q0 - Q) / delta_Q
+```bash
+python -m unittest discover -s tests -v
 ```
 
-Utility equals 1 up to 5 minutes, follows a normalized truncated Gaussian between 5 and 20 minutes, and equals 0 from 20 minutes onward. The squared-overtime penalty continues beyond 20 minutes. Normalization constants compare the fixed-station baseline with an all-candidate service reference.
+Tests cover service-utility thresholds, reward consistency, directed-distance budget feasibility, policy updates and checkpoint loading. Release checks also exercised the training, resume and inference commands on synthetic data and verified parameter-name compatibility and matching forward outputs against the research model on small inputs.
 
-The paper's baseline uses 100 units per period and a cumulative budget of 250.6030337546764 km across the two period transitions. Matching uses directed road distances and exact one-to-one minimum-cost assignment. The constructive feasibility mask maintains a feasible completion; it is sufficient, not necessary, and may exclude some feasible actions. Full feasibility is checked independently after decoding.
+| Environment | Python | PyTorch |
+|---|---|---|
+| Study training environment | 3.10.20 | 2.6.0 |
+| Release validation environment (CPU) | 3.13.13 | 2.9.1 |
 
-The current network assumes exactly three periods and the baseline equal-weight objective. The input interface also allows smaller instances for testing; this should not be interpreted as validated cross-scale generalization.
+This repository provides a portable single-process implementation. Service updates and exact matching run on the CPU, while the policy runs on CPU or GPU. Distributed training and the optimized GPU environment used in the study are not included; identical training trajectories and reported runtimes are therefore not guaranteed. A full Beijing experiment was not rerun for release validation.
 
-## Input format and repository layout
+The feasibility mask supplies a sufficient certificate and may exclude some feasible actions. Support for other input sizes does not by itself establish cross-scale or cross-scenario generalization.
 
-See [docs/data_format.md](docs/data_format.md) for array shapes, units, gain definitions and the instance manifest.
+## Citation
 
-```text
-firedeploy/     Model, environment, training and inference
-configs/        Beijing training budget and a tiny software-check budget
-examples/       Synthetic input generator
-tests/          Reward, feasibility, gradient and checkpoint checks
-docs/           Processed-input specification
-licenses/       Third-party license notices
-```
+If you use this code in research, please cite the accompanying manuscript named above. A formatted citation will be added when publication metadata becomes available.
 
-## Attribution
+## License and acknowledgments
 
-This repository is released under the [MIT License](LICENSE).
+This project is released under the [MIT License](LICENSE).
 
-The graph-attention encoder is adapted from [attention-learn-to-route](https://github.com/wouterkool/attention-learn-to-route) by Wouter Kool and collaborators, with the original projection layout retained and LayerNorm / PyTorch SDPA used here. The original MIT copyright and permission notice is retained in `licenses/`.
-
-For scientific use, cite the associated manuscript. Publication metadata will be added when available.
+The graph-attention encoder is adapted from [attention-learn-to-route](https://github.com/wouterkool/attention-learn-to-route), retaining its projection parameter layout and using LayerNorm and PyTorch scaled dot-product attention. The original copyright and MIT license notice are retained in [licenses/attention-learn-to-route-MIT.txt](licenses/attention-learn-to-route-MIT.txt).
